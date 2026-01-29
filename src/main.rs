@@ -29,6 +29,21 @@ use embedded_graphics_core::{
 
 use esp_backtrace as _;
 
+#[unsafe(link_section = ".rwtext")]
+pub unsafe fn cache_writeback_addr(addr: u32, size: u32) {
+    unsafe extern "C" {
+        fn rom_Cache_WriteBack_Addr(addr: u32, size: u32);
+        fn Cache_Suspend_DCache_Autoload() -> u32;
+        fn Cache_Resume_DCache_Autoload(value: u32);
+    }
+    // suspend autoload, avoid load cachelines being written back
+    unsafe {
+        let autoload = Cache_Suspend_DCache_Autoload();
+        rom_Cache_WriteBack_Addr(addr, size);
+        Cache_Resume_DCache_Autoload(autoload);
+    }
+}
+
 extern crate alloc;
 
 fn init_psram_heap(start: *mut u8, size: usize) {
@@ -78,6 +93,16 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
+    // let sw_int =
+    //     esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    //
+    // static EXECUTOR_CORE_0: static_cell::StaticCell<esp_rtos::embassy::InterruptExecutor<2>> =
+    //     static_cell::StaticCell::new();
+    // let executor_core0 = esp_rtos::embassy::InterruptExecutor::new(sw_int.software_interrupt2);
+    // let executor_core0 = EXECUTOR_CORE_0.init(executor_core0);
+    //
+    // let core0_spawner = executor_core0.start(esp_hal::interrupt::Priority::Priority1);
+
     info!("Embassy initialized!");
 
     // Done with esp-hal initialization /////////////////////////////////////////////////////////////
@@ -90,6 +115,7 @@ async fn main(spawner: Spawner) -> ! {
     let buf_box: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
     let buf_box2: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
 
+    // core0_spawner.spawn(drive_display(buf_box)).ok();
     spawner.spawn(drive_display(buf_box)).ok();
     spawner.spawn(app(buf_box2)).ok();
 
@@ -105,6 +131,10 @@ async fn main(spawner: Spawner) -> ! {
 
 #[embassy_executor::task]
 pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
+    let ptr = Box::into_raw(buf_box);
+    let buf_box: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
+    let buf_box3: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
+
     let peripherals = unsafe { Peripherals::steal() };
 
     // turn on backlight
@@ -123,7 +153,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     let config = esp_hal::lcd_cam::lcd::dpi::Config::default()
         .with_clock_mode(esp_hal::lcd_cam::lcd::ClockMode {
             polarity: esp_hal::lcd_cam::lcd::Polarity::IdleLow,
-            phase: esp_hal::lcd_cam::lcd::Phase::ShiftLow,
+            phase: esp_hal::lcd_cam::lcd::Phase::ShiftHigh, // High, not Low
         })
         .with_frequency(Rate::from_mhz(16))
         .with_format(esp_hal::lcd_cam::lcd::dpi::Format {
@@ -132,17 +162,17 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         })
         .with_timing(esp_hal::lcd_cam::lcd::dpi::FrameTiming {
             horizontal_active_width: 800,
-            horizontal_total_width: 840,
-            horizontal_blank_front_porch: 10,
+            horizontal_total_width: 808,
+            horizontal_blank_front_porch: 8,
 
             vertical_active_height: 480,
-            vertical_total_height: 504,
-            vertical_blank_front_porch: 12,
+            vertical_total_height: 488,
+            vertical_blank_front_porch: 8,
 
             hsync_width: 4,
             vsync_width: 4,
 
-            hsync_position: 10,
+            hsync_position: 8,
         })
         .with_vsync_idle_level(Level::High)
         .with_hsync_idle_level(Level::High)
@@ -187,11 +217,38 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
 
     #[allow(clippy::manual_div_ceil)]
     const NUM_DMA_DESC: usize = (FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    info!("NUM_DMA_DESC: {NUM_DMA_DESC}");
     #[unsafe(link_section = ".dma")]
     static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] = [DmaDescriptor::EMPTY; NUM_DMA_DESC];
     #[allow(static_mut_refs)]
     let mut dma_tx: DmaTxBuf = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+    unsafe {
+        TX_DESCRIPTORS[NUM_DMA_DESC-1].next = &mut TX_DESCRIPTORS[0];
+        TX_DESCRIPTORS[NUM_DMA_DESC-1].set_suc_eof(true);
+    }
 
+    info!("Transfering");
+    Timer::after_secs(1).await;
+
+    let xfer_holder = match dpi.send(true, dma_tx) {
+        Ok(xfer) => {
+            // Strange behavior, to see display need to check is_done and wait and after wait it stops even though the next lines are also wait
+            if !xfer.is_done() {
+                info!("Tested Transfer is done");
+            }
+            Some(xfer)
+        }
+        Err((e, _, _)) => {
+            error!("Initial DMA send error: {:?}", e);
+            None
+        }
+    };
+
+    info!("buf_box3_len {}", buf_box3.len());
+    loop {
+        Timer::after_millis(100).await;
+        unsafe {cache_writeback_addr(buf_box3.as_ptr() as u32, buf_box3.len() as u32); }
+    }
     loop {
         let _start = esp_hal::time::Instant::now();
         match dpi.send(false, dma_tx) {
@@ -204,12 +261,12 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
                 //         embassy_futures::yield_now().await;
                 //         yield_count += 1;
                 //     } else {
-                        let (_res, dpi2, tx2) = xfer.wait();
-                        dpi = dpi2;
-                        dma_tx = tx2;
-                    // break;
-                    //  }
-                 // }
+                let (_res, dpi2, tx2) = xfer.wait();
+                dpi = dpi2;
+                dma_tx = tx2;
+                // break;
+                //  }
+                // }
                 let took = start.elapsed();
                 // info!("took: {}, yield_count={yield_count}", took.as_micros());
             }
@@ -236,19 +293,36 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
         }
     }
 
+    let [yellow_lo, yellow_hi] = Rgb565::YELLOW.into_storage().to_le_bytes();
+    for y in 0..479  {
+        for x in [0, 400, 799] {
+            buf_box2[(y * LCD_H_RES as usize + x) * 2] = yellow_lo;
+            buf_box2[(y * LCD_H_RES as usize + x) * 2 + 1] = yellow_hi;
+        }
+    }
+    for x in 0..799 {
+        for y in [0, 240, 479] {
+            buf_box2[(y * LCD_H_RES as usize + x) * 2] = yellow_lo;
+            buf_box2[(y * LCD_H_RES as usize + x) * 2 + 1] = yellow_hi;
+        }
+    }
+
     let [red_lo, red_hi] = Rgb565::RED.into_storage().to_le_bytes();
     let mut x = 0;
     let mut y = 0;
     let mut dx: isize = 1;
     let mut dy: isize = 1;
     loop {
-        buf_box2[(y * LCD_H_RES as usize + x) * 2] = red_lo;
-        buf_box2[(y * LCD_H_RES as usize + x) * 2 + 1] = red_hi;
+        let idx = (y * LCD_H_RES as usize + x) * 2;
+
+        buf_box2[idx] = red_lo;
+        buf_box2[idx+1] = red_hi;
         if x >= 799 {
             dx = -1;
         };
         if x == 0 {
             dx = 1;
+            info!("Drawing");
         };
         if y >= 479 {
             dy = -1;
@@ -258,6 +332,12 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
         };
         x = (x as isize + dx) as usize;
         y = (y as isize + dy) as usize;
-        Timer::after_micros(1000).await;
+
+        // unsafe {cache_writeback_addr(buf_box2.as_ptr().add(idx) as u32, 2); }
+        Timer::after_micros(10000).await;
+        // let start = Instant::now();
+        // loop {
+        //     if start.elapsed() > Duration::from_millis(100) { break; }
+        // }
     }
 }
