@@ -69,6 +69,9 @@ const FRAME_BYTES: usize = (LCD_H_RES as usize * LCD_V_RES as usize) * 2;
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
+
+
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -155,7 +158,8 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
             polarity: esp_hal::lcd_cam::lcd::Polarity::IdleLow,
             phase: esp_hal::lcd_cam::lcd::Phase::ShiftHigh, // High, not Low
         })
-        .with_frequency(Rate::from_mhz(16))
+        .with_frequency(Rate::from_hz(15999990))
+        // .with_frequency(Rate::from_hz(16000000))
         .with_format(esp_hal::lcd_cam::lcd::dpi::Format {
             enable_2byte_mode: true,
             ..Default::default()
@@ -174,8 +178,8 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
 
             hsync_position: 8,
         })
-        .with_vsync_idle_level(Level::High)
-        .with_hsync_idle_level(Level::High)
+        .with_vsync_idle_level(Level::Low)
+        .with_hsync_idle_level(Level::Low)
         .with_de_idle_level(Level::Low)
         .with_disable_black_region(false);
 
@@ -249,6 +253,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         Timer::after_millis(100).await;
         unsafe {cache_writeback_addr(buf_box3.as_ptr() as u32, buf_box3.len() as u32); }
     }
+
     loop {
         let _start = esp_hal::time::Instant::now();
         match dpi.send(false, dma_tx) {
@@ -341,3 +346,4 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
         // }
     }
 }
+
