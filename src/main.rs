@@ -146,6 +146,21 @@ async fn main(spawner: Spawner) -> ! {
     info!("Embassy initialized!");
 
 
+    // Allocate a PSRAM-backed DMA buffer for the frame
+    let mut buf_box: Box<[u8; FRAME_BYTES]> = Box::new([0; FRAME_BYTES]);
+
+    let ptr = Box::as_mut_ptr(&mut buf_box);
+    let buf_box2: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
+    let buf_box3: Box<[u8; FRAME_BYTES]> = unsafe { Box::from_raw(ptr) };
+    interrupt_core0_spawner.spawn(drive_display_new(buf_box2)).ok();
+    spawner.spawn(app(buf_box3)).ok();
+    loop {
+        Timer::after_secs(1).await;
+        info!("Main done");
+    }
+
+
+
     Timer::after_millis(10).await;
     // turn on backlight
     let _ = Output::new(peripherals.GPIO2, Level::High, OutputConfig::default());
@@ -587,7 +602,7 @@ pub async fn drive_display_new(buf_box: Box<[u8; FRAME_BYTES]>) {
                 VSYNC_SIGNAL.wait().await;
                 let start = Instant::now();
                 let (_res, dpi2, tx2) = xfer.wait();
-                info!("{}", start.elapsed().as_micros());
+                print!("{},", start.elapsed().as_micros());
                 dpi = dpi2;
                 dma_tx = tx2;
             }
@@ -757,7 +772,6 @@ pub async fn drive_display_new(buf_box: Box<[u8; FRAME_BYTES]>) {
 
 #[embassy_executor::task]
 pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
-    // Timer::after_secs(2).await; // part of fix
     const FRAME_PIXELS: usize = (LCD_H_RES as usize) * (LCD_V_RES as usize);
 
     // Clear screen to blue for sanity check
@@ -783,6 +797,7 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
         }
     }
 
+    Timer::after_secs(2).await;
     let [red_lo, red_hi] = Rgb565::RED.into_storage().to_le_bytes();
     let mut x = 0;
     let mut y = 0;
@@ -811,7 +826,7 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
 
         // unsafe {cache_writeback_addr(buf_box2.as_ptr().add(idx) as u32, 2); }
         Timer::after_millis(1).await;
-        // let start = Instant::now();
+        let start = Instant::now();
         // loop {
         //     if start.elapsed() > Duration::from_millis(100) { break; }
         // }
