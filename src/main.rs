@@ -12,7 +12,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::dma::{CHUNK_SIZE, DmaDescriptor, DmaTxBuf};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::lcd_cam::LcdCam;
-use esp_hal::peripherals::{self, Peripherals};
+use esp_hal::peripherals::Peripherals;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 
@@ -117,7 +117,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // core0_spawner.spawn(drive_display(buf_box)).ok();
     spawner.spawn(drive_display(buf_box)).ok();
-    spawner.spawn(app(buf_box2)).ok();
+    spawner.spawn(drive_data(buf_box2)).ok();
 
     // Done with UI stuff initialization /////////////////////////////////////////////////////////////
 
@@ -155,7 +155,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
             polarity: esp_hal::lcd_cam::lcd::Polarity::IdleLow,
             phase: esp_hal::lcd_cam::lcd::Phase::ShiftHigh, // High, not Low
         })
-        .with_frequency(Rate::from_mhz(16))
+        .with_frequency(Rate::from_mhz(16)) // changin to 15999990 postpones the offset from after 23 seconds to after 12 minutes
         .with_format(esp_hal::lcd_cam::lcd::dpi::Format {
             enable_2byte_mode: true,
             ..Default::default()
@@ -187,7 +187,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     //     8 /* B0 */, 3 /* B1 */, 46 /* B2 */, 9 /* B3 */, 1 /* B4 */
     // );
 
-    let mut dpi = esp_hal::lcd_cam::lcd::dpi::Dpi::new(lcd_cam.lcd, tx_channel, config)
+    let dpi = esp_hal::lcd_cam::lcd::dpi::Dpi::new(lcd_cam.lcd, tx_channel, config)
         .unwrap()
         .with_vsync(peripherals.GPIO41) // 41
         .with_hsync(peripherals.GPIO39)
@@ -221,16 +221,16 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     #[unsafe(link_section = ".dma")]
     static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] = [DmaDescriptor::EMPTY; NUM_DMA_DESC];
     #[allow(static_mut_refs)]
-    let mut dma_tx: DmaTxBuf = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+    let dma_tx: DmaTxBuf = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
     unsafe {
         TX_DESCRIPTORS[NUM_DMA_DESC-1].next = &mut TX_DESCRIPTORS[0];
-        TX_DESCRIPTORS[NUM_DMA_DESC-1].set_suc_eof(true);
+        TX_DESCRIPTORS[NUM_DMA_DESC-1].set_suc_eof(true); // not relevant
     }
 
     info!("Transfering");
     Timer::after_secs(1).await;
 
-    let xfer_holder = match dpi.send(true, dma_tx) {
+    let _xfer_holder = match dpi.send(true, dma_tx) {
         Ok(xfer) => {
             // Strange behavior, to see display need to check is_done and wait and after wait it stops even though the next lines are also wait
             if !xfer.is_done() {
@@ -244,44 +244,15 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         }
     };
 
-    info!("buf_box3_len {}", buf_box3.len());
+    // flush DMA cache 10 times a second
     loop {
         Timer::after_millis(100).await;
         unsafe {cache_writeback_addr(buf_box3.as_ptr() as u32, buf_box3.len() as u32); }
     }
-    loop {
-        let _start = esp_hal::time::Instant::now();
-        match dpi.send(false, dma_tx) {
-            Ok(xfer) => {
-                let start = Instant::now();
-                Timer::after_micros(20000).await; // 26438 is optimal w/o other tasks running
-                let mut yield_count = 0;
-                // loop {
-                //     if !xfer.is_done() {
-                //         embassy_futures::yield_now().await;
-                //         yield_count += 1;
-                //     } else {
-                let (_res, dpi2, tx2) = xfer.wait();
-                dpi = dpi2;
-                dma_tx = tx2;
-                // break;
-                //  }
-                // }
-                let took = start.elapsed();
-                // info!("took: {}, yield_count={yield_count}", took.as_micros());
-            }
-            Err((e, dpi2, tx2)) => {
-                error!("Initial DMA send error: {:?}", e);
-                dpi = dpi2;
-                dma_tx = tx2;
-            }
-        }
-        // info!("{}", start.elapsed().as_micros());
-    }
 }
 
 #[embassy_executor::task]
-pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
+pub async fn drive_data(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
     const FRAME_PIXELS: usize = (LCD_H_RES as usize) * (LCD_V_RES as usize);
 
     // Clear screen to blue for sanity check
@@ -335,9 +306,5 @@ pub async fn app(mut buf_box2: Box<[u8; FRAME_BYTES]>) {
 
         // unsafe {cache_writeback_addr(buf_box2.as_ptr().add(idx) as u32, 2); }
         Timer::after_micros(10000).await;
-        // let start = Instant::now();
-        // loop {
-        //     if start.elapsed() > Duration::from_millis(100) { break; }
-        // }
     }
 }
