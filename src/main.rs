@@ -225,7 +225,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     #[unsafe(link_section = ".dma")]
     static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] = [DmaDescriptor::EMPTY; NUM_DMA_DESC];
     #[allow(static_mut_refs)]
-    let mut dma_tx: DmaTxBuf = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+    let dma_tx: DmaTxBuf = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
     unsafe {
         TX_DESCRIPTORS[NUM_DMA_DESC-1].next = &mut TX_DESCRIPTORS[0];
         TX_DESCRIPTORS[NUM_DMA_DESC-1].set_suc_eof(true);
@@ -234,9 +234,9 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     info!("Transfering");
     Timer::after_secs(1).await;
 
-    let xfer_holder = match dpi.send(true, dma_tx) {
+    let _xfer_holder = match dpi.send(true, dma_tx) {
         Ok(xfer) => {
-            // Strange behavior, to see display need to check is_done and wait and after wait it stops even though the next lines are also wait
+            // if removing this test below there is offset in the display after 10 seconds
             if !xfer.is_done() {
                 info!("Tested Transfer is done");
             }
@@ -254,35 +254,6 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         unsafe {cache_writeback_addr(buf_box3.as_ptr() as u32, buf_box3.len() as u32); }
     }
 
-    loop {
-        let _start = esp_hal::time::Instant::now();
-        match dpi.send(false, dma_tx) {
-            Ok(xfer) => {
-                let start = Instant::now();
-                Timer::after_micros(20000).await; // 26438 is optimal w/o other tasks running
-                let mut yield_count = 0;
-                // loop {
-                //     if !xfer.is_done() {
-                //         embassy_futures::yield_now().await;
-                //         yield_count += 1;
-                //     } else {
-                let (_res, dpi2, tx2) = xfer.wait();
-                dpi = dpi2;
-                dma_tx = tx2;
-                // break;
-                //  }
-                // }
-                let took = start.elapsed();
-                // info!("took: {}, yield_count={yield_count}", took.as_micros());
-            }
-            Err((e, dpi2, tx2)) => {
-                error!("Initial DMA send error: {:?}", e);
-                dpi = dpi2;
-                dma_tx = tx2;
-            }
-        }
-        // info!("{}", start.elapsed().as_micros());
-    }
 }
 
 #[embassy_executor::task]
