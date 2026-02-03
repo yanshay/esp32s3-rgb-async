@@ -123,7 +123,7 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
     let config = esp_hal::lcd_cam::lcd::dpi::Config::default()
         .with_clock_mode(esp_hal::lcd_cam::lcd::ClockMode {
             polarity: esp_hal::lcd_cam::lcd::Polarity::IdleLow,
-            phase: esp_hal::lcd_cam::lcd::Phase::ShiftLow,
+            phase: esp_hal::lcd_cam::lcd::Phase::ShiftHigh,
         })
         .with_frequency(Rate::from_mhz(16))
         .with_format(esp_hal::lcd_cam::lcd::dpi::Format {
@@ -132,17 +132,17 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         })
         .with_timing(esp_hal::lcd_cam::lcd::dpi::FrameTiming {
             horizontal_active_width: 800,
-            horizontal_total_width: 840,
-            horizontal_blank_front_porch: 10,
+            horizontal_total_width: 808,
+            horizontal_blank_front_porch: 8,
 
             vertical_active_height: 480,
-            vertical_total_height: 504,
-            vertical_blank_front_porch: 12,
+            vertical_total_height: 488,
+            vertical_blank_front_porch: 8,
 
             hsync_width: 4,
             vsync_width: 4,
 
-            hsync_position: 10,
+            hsync_position: 8,
         })
         .with_vsync_idle_level(Level::High)
         .with_hsync_idle_level(Level::High)
@@ -197,8 +197,10 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
         match dpi.send(false, dma_tx) {
             Ok(xfer) => {
                 let start = Instant::now();
+                // Waiting approximately the time it takes to display a frame to allow other tasks to run
                 Timer::after_micros(20000).await; // 26438 is optimal w/o other tasks running
-                let mut yield_count = 0;
+                // potentially yield extra time beyond the 20,000 micros
+                // let mut yield_count = 0;
                 // loop {
                 //     if !xfer.is_done() {
                 //         embassy_futures::yield_now().await;
@@ -208,9 +210,9 @@ pub async fn drive_display(buf_box: Box<[u8; FRAME_BYTES]>) {
                         dpi = dpi2;
                         dma_tx = tx2;
                     // break;
-                    //  }
-                 // }
-                let took = start.elapsed();
+                //   }
+                // }
+                // let took = start.elapsed();
                 // info!("took: {}, yield_count={yield_count}", took.as_micros());
             }
             Err((e, dpi2, tx2)) => {
